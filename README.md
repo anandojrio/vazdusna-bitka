@@ -1,185 +1,95 @@
-***
+# Air Battle Simulation
 
-## README
+A distributed air battle simulation implemented in Java using concurrent programming, Java RMI, and TCP socket servers.
 
-### 1. PREGLED SISTEMA
+## Overview
 
-Projekat implementira simulaciju vazdušne borbe između **BLUE** i **RED** strane sa sledećim komponentama:[^1]
+Two opposing sides — **BLUE** (base at A1) and **RED** (base at H8) — operate on an 8×8 grid (A1–H8) with 0.1-unit resolution inside each cell. Each side runs three separate processes: a Command Center, a Squadron, and a shared Radar service used by both sides.
 
-- Komandni centri: `BlueCommandCenterApplication`, `RedCommandCenterApplication`
-- Skuadron aplikacije: `BlueSquadroonApplication`, `RedSquadroonApplication`
-- Avioni: `AircraftWorker`
-- Rakete: `MissileWorker`
-- Centralni radar servis: `RadarServiceImpl` + `AirObjectRegistry`
-- Zajednički DTO/eum/model sloj: `common.dto`, `common.enums`, `common.model`[^3]
+## Architecture
 
-Komunikacija ide preko TCP soketa (CC ↔ squadron) i JSON poruka (Jackson), a radarski servis je izložen preko RMI.[^4][^3]
+| Process | Description |
+|---|---|
+| `BlueCommandCenterApplication` | BLUE command center (port 5000), user interface and coordination |
+| `RedCommandCenterApplication` | RED command center (port 5001), user interface and coordination |
+| `BlueSquadroonApplication` | 5 BLUE aircraft threads (P1–P5), American aircraft |
+| `RedSquadroonApplication` | 5 RED aircraft threads (C1–C5), Russian aircraft |
+| `RadarApplication` | Shared radar service exposed via Java RMI |
 
-***
+**Technologies:** Java 23, Java RMI (radar), TCP sockets (CC ↔ squadron), Jackson (JSON messaging), thread pools (missile launchers).
 
-### 2. INICIJALIZACIJA I TOPOLOGIJA
+## Aircraft Types
 
-- Tabla je 8x8, koordinate u opsegu $[0.0, 7.9]$, ćelije A1–H8 dobijaju se `floor(x), floor(y)`.[^3]
-- Baza BLUE strane je uvek A1 $(0.0, 0.0)$.
-- Baza RED strane je uvek H8 $(7.0, 7.0)$.[^3]
+| Type | Side | Patrol Step | Return Step | Max Pause (ms) | Radar Range |
+|---|---|---|---|---|---|
+| F-15 | BLUE | 1.0 | 1.0 | 600 | 2.0 |
+| F-22 | BLUE | 0.8 | 0.8 | 400 | 3.5 |
+| SU-30 | RED | 1.0 | 1.0 | 600 | 2.0 |
+| MiG-31 | BOTH | 1.4 | 1.4 | 200 | 3.5 |
 
-Svaka squadron aplikacija pokreće po 5 niti tipa `AircraftWorker`, sa odgovarajućim `id`, `AircraftType` i `Side`, i svi avioni startuju **u bazi svog tima**.[^3]
+## Aircraft States
 
-***
+- **IN_BASE** — aircraft is idle at home base, not tracked by radar  
+- **PATROLLING** — aircraft moves within the assigned patrol zone, reports position to radar every step  
+- **RETURNING** — aircraft flies back to base, unregisters from radar on arrival  
+- **DESTROYED** — aircraft is shot down and removed from the simulation  
 
-### 3. STANJE AVIONA I KRETANJE
+## Radar
 
-`AircraftWorker` drži:[^3]
+All flying objects (aircraft and missiles) register their position with the shared Radar via RMI after each movement step. The Radar returns a list of objects within Euclidean radar range. Aircraft report detected contacts back to their Command Center over the socket connection.
 
-- `state`: `IN_BASE`, `PATROLLING`, `RETURNING`, `DESTROYED`
-- `aircraftType`: definiše `patrolStep`, `returnStep`, `maxPauseMs`, `radarRange`
-- `basePosition`: A1 ili H8, zavisno od strane
+Missiles use a small radar range (0.6 units) and only scan for **AIRCRAFT** objects. A hit is confirmed when the target aircraft appears in the missile's radar scan.
 
-Logika:
+## Missiles
 
-- `IN_BASE`: avion stoji u bazi, šalje samo report.
-- `PATROLLING`: avion se kreće unutar zadate patrol zone koristeći `patrolStep`, odbija se od granica zone, zaokružuje koordinate na jednu decimalu i clamp-uje na tablu.[^3]
-- `RETURNING`: avion se kreće ka `basePosition` korišćenjem `returnStep` dok ne stigne dovoljno blizu, zatim prelazi u `IN_BASE`.
-- `DESTROYED`: nit se gasi.[^3]
+Missiles are launched from the base position (A1 or H8) toward the last known target position. Each missile:
 
-Patrol zona:
+- Moves toward the last known target position at `MissileConfig.STEP` per tick  
+- Scans for the target aircraft using its small radar on every step  
+- Reports **HIT** if it detects the target aircraft in range  
+- Reports **SELF_DESTRUCTED** if it reaches the last known position without detecting the target  
 
-- Postavlja se komandama `P? PATROL A2 B3` ili numerički.
-- Koordinate se normalizuju (min/max), clamp-uju na tablu i osigurava se da zona ima površinu (ako su granice jednake, širi se za jedan `patrolStep`).[^3]
+Each side has 3 base launchers with a total of 15 missiles. A launcher is released for reuse only after its missile finishes its run.
 
-***
+## Kill Notification
 
-### 4. RADAR AVIONA
+When a missile hits a target, the attacking Command Center sends a `KillNotification` to the enemy Command Center over a dedicated kill-link TCP connection. The enemy CC then sends a `DESTROY` command to the aircraft, which terminates its thread.
 
-Svaki avion na svakom tick-u poziva:
+---
 
+## How to Run
 
-RadarUpdateRequest(
-    aircraftType,
-    id,
-    FlyingObjectType.AIRCRAFT,
-    position,
-    radarRange,
-    side
-)
-→ RadarService.updateAndScan()
+Start the four processes **in this order**:
 
+1. **Radar** (shared by both sides)  
+   - Run: `RadarApplication`
 
-`RadarServiceImpl`:
+2. **Blue Command Center**  
+   - Run: `BlueCommandCenterApplication`  
+   - Listens on port 5000 (squadron), 6000 (kill-link)
 
-- Upisuje/azurira sopstveno stanje u `AirObjectRegistry` (svi objekti u vazduhu).[^3]
-- Iterira kroz sve `AirObjectState` objekte i filtrira:
-    - ignoriše samog sebe,
-    - ignoriše neaktivne objekte,
-    - za aircraft poziv ne filtrira po tipu, vidi sve u dometu.[^3]
+3. **Red Command Center**  
+   - Run: `RedCommandCenterApplication`  
+   - Listens on port 5001 (squadron), 6001 (kill-link)
 
-Vidljivi kontakti vraćaju se kao `RadarContact` (id, type, side, position).[^3]
+4. **Blue Squadron**  
+   - Run: `BlueSquadroonApplication`  
+   - Aircraft IDs: P1–P5
 
-Komandni centar:
+5. **Red Squadron**  
+   - Run: `RedSquadroonApplication`  
+   - Aircraft IDs: C1–C5
 
-- Drži mapu `enemyPositions` i `lastKnownEnemyCellByAircraft`.
-- Pri svakom `AircraftReportMessage` ažurira poslednje poznate pozicije neprijateljskih aviona i koristi ih za `ATTACK` komandu.[^3]
+---
 
-***
+## Commands
 
-### 5. KOMANDNI CENTRI I KOMANDE
+Both command centers accept the same command format. Replace `P?` with a BLUE aircraft ID (P1–P5) or `C?` with a RED aircraft ID (C1–C5).
 
-Komande sa konzole:[^3]
-
-- `SHOW`: iscrtava matricu 8x8 sa svim prijateljskim i neprijateljskim letelicama.
-- `P? RETURN` / `C? RETURN`: šalje `CommandMessage.RETURN_TO_BASE` ka konkretnom avionu.
-- `P? PATROL ...` / `C? PATROL ...`: šalje `CommandMessage.PATROL` sa koordinatama zone.
-- `P? ATTACK C?` / `C? ATTACK P?`: šalje `CommandMessage.ATTACK` sa `targetId` i poslednjom poznatom `targetX`, `targetY` iz `enemyPositions`.[^3]
-
-Kill link:
-
-- Svaki CC sluša na svom `KILL_LISTEN_PORT` i prima `KillNotification` sa ID žrtve.
-- Po prijemu:
-    - briše taj ID iz svojih mapa,
-    - šalje `DESTROY` komandu u svoj squadron,
-    - prosleđuje kill na protivnički CC preko stalne veze.[^3]
-
-***
-
-### 6. RAKETE I NAVODJENJE
-
-`MissileWorker` implementira logiku rakete:[^5][^3]
-
-- Inicijalno dobija:
-    - `initialPosition` (A1/H8 ili baza),
-    - `initialTargetPosition` (poslednja poznata pozicija cilja),
-    - `RadarService`,
-    - `missileRadarRange` (mali domet, npr. 0.6).[^3]
-
-Petlja:
-
-1. `moveTowardsTarget()` – raketa se pomera u pravcu poslednje poznate pozicije cilja, korakom `MissileConfig.STEP`, uz zaokruživanje na jednu decimalu.[^3]
-2. `canConfirmHit()`:
-    - šalje `RadarUpdateRequest(null, id, FlyingObjectType.MISSILE, position, missileRadarRange, side)`
-    - radar upisuje raketu u registry i vraća sve objekte u dometu,
-    - logika filtra u radaru: ako je `request.objectType == MISSILE`, u scan ulaze **samo** `AIRCRAFT` objekti.[^3]
-    - `canConfirmHit` vraća true samo ako u vidljivim objektima postoji `contact` sa:
-        - `contact.objectType == AIRCRAFT` i
-        - `contact.id == targetId`.[^3]
-3. Ako `canConfirmHit()` vrati true:
-    - raketa šalje `MissileStatus.HIT`, loguje HIT i završava rad.
-4. Ako nije videla cilj, proverava `reachedLastKnownPosition()`:
-    - ako je raketa dovoljno blizu `lastKnownTarget`, a cilj nije viđen u dometu malog radara, šalje `MissileStatus.SELF_DESTRUCTED` i gasi se.[^3]
-5. Ako nije ni hit ni self-destruct, šalje `MissileStatus.TRACKING` i nastavlja.[^3]
-
-Kada nit završi, pokušava `radarService.unregister(id)` i poziva `onFinished` callback (oslobađanje base launchera ako je korišćen).[^3]
-
-Ovo tačno implementira pravilo:
-
-> Raketa ide na poslednju poznatu lokaciju cilja. Ako ga u malom dometu oko sebe ne vidi kad stigne u taj region, samouništava se. Ako ga vidi, potvrđuje hit i sledi logika uništenja cilja.[^2][^1]
-
-***
-
-### 7. KILL LOGIKA I UNISTENJE AVIONA
-
-- Kad CC primi `MissileReportMessage` sa `status == HIT`:
-    - loguje HIT i uklanja neprijateljski avion iz `enemyPositions`,
-    - šalje `KillNotification` preko kill linka protivničkom CC, koji onda šalje `DESTROY` u svoj squadron.[^3]
-- `AircraftWorker.destroyFromCommandCenter()`:
-    - postavlja state u `DESTROYED`,
-    - loguje razlog,
-    - glavna petlja izlazi jer `running = false`.[^3]
-
-Avion se time efektivno uklanja iz simulacije (ne kreće se više, prestaje da šalje reportove).[^3]
-
-***
-
-### 8. LOGOVANJE
-
-Logovi su svedeni na ono što je smisleno za praćenje:[^3]
-
-- Squadron:
-    - spawn aviona u bazi sa inicijalnim `state=IN_BASE`,
-    - promene stanja (IN_BASE → PATROLLING, PATROLLING → RETURNING, ...),
-    - promene ćelije (`moved X -> Y`),
-    - kreiranje i životni ciklus raketa (launched, HIT, SELF_DESTRUCTED, finished).[^3]
-- Komandni centar:
-    - registracija aviona,
-    - detekcije i pomeranja neprijateljskih aviona,
-    - slanje komandi PATROL / RETURN / ATTACK,
-    - Missile report sa HIT/SELF_DESTRUCTED,
-    - kill notifikacije i prosleđivanje DESTROY komandi.[^3]
-
-***
-
-### 9. FUNKCIONALNA POKRICE ZADATKA
-
-Na osnovu tvog opisa i koda:[^2][^1]
-
-- Inicijalne pozicije, baze i strane: odrađeno.
-- Kretanje aviona (patrola, povratak, baza): odrađeno, sa tip-specifičnim parametrima.
-- Radar aviona sa dometom po tipu i poslednjom poznatom pozicijom ciljeva: odrađeno.
-- Komandni centri, dvosmerna komunikacija sa squadronima: odrađeno.
-- Prikaz table (SHOW) sa prijateljskim i neprijateljskim avionima: odrađeno.
-- ATTACK komanda ka poslednjoj poznatoj poziciji cilja: odrađeno.
-- Rakete koje:
-    - idu ka lastKnownTarget,
-    - koriste mali radar da potvrde da je cilj još tu,
-    - ako ga nema, self-destruct,
-    - ako ga ima, HIT i ubijaju avion, uz sinhronizovan kill-link: odrađeno.[^3]
-- Logika uništenja aviona i sinkronizacija oba komandna centra: odrađeno.
+| Command | Example | Description |
+|---|---|---|
+| `SHOW` | `SHOW` | Display the 8×8 grid with all known aircraft positions |
+| `<id> PATROL <cell1> <cell2>` | `P1 PATROL A2 B3` | Order aircraft to patrol the zone between two grid cells |
+| `<id> PATROL <x1> <y1> <x2> <y2>` | `P2 PATROL 0.0 2.0 1.0 3.0` | Same as above but with numeric coordinates |
+| `<id> RETURN` | `P1 RETURN` | Order aircraft to return to base (A1 for BLUE, H8 for RED) |
+| `<id> ATTACK <targetId>` | `P1 ATTACK C3` | Launch a missile from base toward the last known position of the target |
