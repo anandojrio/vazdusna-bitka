@@ -1,95 +1,119 @@
-# Air Battle Simulation
+# Vazdusna Bitka
 
-A distributed air battle simulation implemented in Java using concurrent programming, Java RMI, and TCP socket servers.
+A distributed air-battle simulation in Java that combines concurrent aircraft execution, Java RMI, TCP socket coordination, shared radar state, and missile-based combat decisions across multiple cooperating processes.
 
 ## Overview
 
-Two opposing sides — **BLUE** (base at A1) and **RED** (base at H8) — operate on an 8×8 grid (A1–H8) with 0.1-unit resolution inside each cell. Each side runs three separate processes: a Command Center, a Squadron, and a shared Radar service used by both sides.
+This project simulates two opposing command structures operating on a shared combat grid. Each side controls aircraft that can patrol, return to base, detect nearby objects through a radar service, and attack enemy aircraft based on last known position. The system is split into independently running processes that communicate through Java RMI and TCP sockets, making it a strong example of stateful distributed coordination under concurrency.
 
 ## Architecture
 
-| Process | Description |
-|---|---|
-| `BlueCommandCenterApplication` | BLUE command center (port 5000), user interface and coordination |
-| `RedCommandCenterApplication` | RED command center (port 5001), user interface and coordination |
-| `BlueSquadroonApplication` | 5 BLUE aircraft threads (P1–P5), American aircraft |
-| `RedSquadroonApplication` | 5 RED aircraft threads (C1–C5), Russian aircraft |
-| `RadarApplication` | Shared radar service exposed via Java RMI |
+The simulation is composed of five main applications:
 
-**Technologies:** Java 23, Java RMI (radar), TCP sockets (CC ↔ squadron), Jackson (JSON messaging), thread pools (missile launchers).
+- `RadarApplication` — shared radar service exposed through Java RMI.
+- `BlueCommandCenterApplication` — BLUE-side command center and operator interface.
+- `RedCommandCenterApplication` — RED-side command center and operator interface.
+- `BlueSquadroonApplication` — BLUE squadron process hosting aircraft threads.
+- `RedSquadroonApplication` — RED squadron process hosting aircraft threads.
+
+The command centers coordinate patrol, return, and attack commands. Squadron processes manage aircraft lifecycle and movement. The shared radar tracks aircraft and missile positions and returns nearby objects within radar range. Missile outcomes are propagated back into the system through dedicated command-center communication links.
+
+## Core Concepts
+
+- Independent long-running processes instead of a single monolith.
+- Concurrent aircraft simulation with per-aircraft execution flow.
+- Shared state access through Java RMI.
+- Command and event propagation through TCP socket channels.
+- Spatial tracking of aircraft and missiles on a continuous grid.
+- Event-driven kill confirmation and enemy notification.
+
+## Simulation Model
+
+The battlefield is represented as an 8x8 grid, with finer-grained position updates inside each cell. Two sides, BLUE and RED, operate from opposite base coordinates and launch patrols into assigned zones. Aircraft move step-by-step, report their location to radar, observe nearby objects within range, and relay detections back to their command center.
+
+Missiles are launched from base toward the target's last known position. A missile continues its path while scanning for the intended target; if the target is detected in range, the hit is confirmed, otherwise the missile self-destructs after reaching the final known destination.
 
 ## Aircraft Types
 
-| Type | Side | Patrol Step | Return Step | Max Pause (ms) | Radar Range |
-|---|---|---|---|---|---|
-| F-15 | BLUE | 1.0 | 1.0 | 600 | 2.0 |
-| F-22 | BLUE | 0.8 | 0.8 | 400 | 3.5 |
-| SU-30 | RED | 1.0 | 1.0 | 600 | 2.0 |
-| MiG-31 | BOTH | 1.4 | 1.4 | 200 | 3.5 |
+| Type | Side | Radar Range | Notes |
+|---|---|---|---|
+| F-15 | BLUE | 2.0 | Standard BLUE patrol aircraft |
+| F-22 | BLUE | 3.5 | Higher detection range |
+| SU-30 | RED | 2.0 | Standard RED patrol aircraft |
+| MiG-31 | BOTH | 3.5 | Shared high-range aircraft type |
 
-## Aircraft States
+## Aircraft Lifecycle
 
-- **IN_BASE** — aircraft is idle at home base, not tracked by radar  
-- **PATROLLING** — aircraft moves within the assigned patrol zone, reports position to radar every step  
-- **RETURNING** — aircraft flies back to base, unregisters from radar on arrival  
-- **DESTROYED** — aircraft is shot down and removed from the simulation  
+Aircraft operate through a small state machine:
 
-## Radar
+- `IN_BASE` — idle at base and not visible to radar.
+- `PATROLLING` — actively moving within an assigned patrol zone.
+- `RETURNING` — traveling back to home base.
+- `DESTROYED` — removed from the active simulation after a confirmed hit.
 
-All flying objects (aircraft and missiles) register their position with the shared Radar via RMI after each movement step. The Radar returns a list of objects within Euclidean radar range. Aircraft report detected contacts back to their Command Center over the socket connection.
+This state-based model keeps command processing explicit and makes concurrency easier to reason about when multiple aircraft and missiles are active simultaneously.
 
-Missiles use a small radar range (0.6 units) and only scan for **AIRCRAFT** objects. A hit is confirmed when the target aircraft appears in the missile's radar scan.
+## Communication Flow
 
-## Missiles
+1. A command center issues a patrol, return, or attack command.
+2. The squadron process forwards that command to the relevant aircraft thread.
+3. Aircraft update movement and register new positions with the shared radar service.
+4. Radar returns nearby contacts within detection range.
+5. Aircraft report sightings back to the command center.
+6. If an attack is initiated, a missile is launched from base toward the target's last known position.
+7. A successful hit triggers enemy command-center notification over a dedicated TCP link.
+8. The enemy side destroys the targeted aircraft and removes it from active execution.
 
-Missiles are launched from the base position (A1 or H8) toward the last known target position. Each missile:
+## Tech Stack
 
-- Moves toward the last known target position at `MissileConfig.STEP` per tick  
-- Scans for the target aircraft using its small radar on every step  
-- Reports **HIT** if it detects the target aircraft in range  
-- Reports **SELF_DESTRUCTED** if it reaches the last known position without detecting the target  
+- Java 23.
+- Java RMI for the shared radar service.
+- TCP sockets for command-center and squadron communication.
+- Jackson for JSON-based messaging.
+- Multi-threaded execution for aircraft and missile workflows.
+- Thread pools for launcher coordination.
 
-Each side has 3 base launchers with a total of 15 missiles. A launcher is released for reuse only after its missile finishes its run.
+## Project Structure
 
-## Kill Notification
+This codebase is organized around process roles and domain-specific behavior:
 
-When a missile hits a target, the attacking Command Center sends a `KillNotification` to the enemy Command Center over a dedicated kill-link TCP connection. The enemy CC then sends a `DESTROY` command to the aircraft, which terminates its thread.
-
----
+- Command-center logic for user-facing control and inter-process coordination.
+- Squadron logic for aircraft creation, command handling, and state transitions.
+- Radar service logic for position registration and proximity scans.
+- Shared message/domain models for communication payloads.
+- Missile execution logic for attack progression and hit detection.
 
 ## How to Run
 
-Start the four processes **in this order**:
+Start the applications in this order:
 
-1. **Radar** (shared by both sides)  
-   - Run: `RadarApplication`
+1. `RadarApplication`
+2. `BlueCommandCenterApplication`
+3. `RedCommandCenterApplication`
+4. `BlueSquadroonApplication`
+5. `RedSquadroonApplication`
 
-2. **Blue Command Center**  
-   - Run: `BlueCommandCenterApplication`  
-   - Listens on port 5000 (squadron), 6000 (kill-link)
+## Example Commands
 
-3. **Red Command Center**  
-   - Run: `RedCommandCenterApplication`  
-   - Listens on port 5001 (squadron), 6001 (kill-link)
+```text
+SHOW
+P1 PATROL A2 B3
+P2 PATROL 0.0 2.0 1.0 3.0
+P1 RETURN
+P1 ATTACK C3
+```
 
-4. **Blue Squadron**  
-   - Run: `BlueSquadroonApplication`  
-   - Aircraft IDs: P1–P5
+## What This Project Demonstrates
 
-5. **Red Squadron**  
-   - Run: `RedSquadroonApplication`  
-   - Aircraft IDs: C1–C5
+- Designing a distributed simulation with multiple independently running services.
+- Combining concurrency and networking in a stateful Java system.
+- Coordinating shared visibility through remote service calls.
+- Modeling combat behavior with explicit state transitions and event flow.
+- Translating a simulation domain into clean process boundaries and communication protocols.
 
----
+## Possible Next Improvements
 
-## Commands
-
-Both command centers accept the same command format. Replace `P?` with a BLUE aircraft ID (P1–P5) or `C?` with a RED aircraft ID (C1–C5).
-
-| Command | Example | Description |
-|---|---|---|
-| `SHOW` | `SHOW` | Display the 8×8 grid with all known aircraft positions |
-| `<id> PATROL <cell1> <cell2>` | `P1 PATROL A2 B3` | Order aircraft to patrol the zone between two grid cells |
-| `<id> PATROL <x1> <y1> <x2> <y2>` | `P2 PATROL 0.0 2.0 1.0 3.0` | Same as above but with numeric coordinates |
-| `<id> RETURN` | `P1 RETURN` | Order aircraft to return to base (A1 for BLUE, H8 for RED) |
-| `<id> ATTACK <targetId>` | `P1 ATTACK C3` | Launch a missile from base toward the last known position of the target |
+- Add a system diagram showing process links and message directions.
+- Add sample console output or an execution walkthrough.
+- Add tests around state transitions and missile-hit scenarios.
+- Add containerized startup or launch scripts for easier reproduction.
